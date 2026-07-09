@@ -11,7 +11,11 @@ import json
 import os
 import numpy as np
 
-STORE_PATH = "vector_store.json"
+# Always resolve to the project root's vector_store.json, regardless of
+# which folder the script is run from (fixes cwd mismatches between
+# running "python src/qa.py" vs "uvicorn main:app" from inside src/).
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STORE_PATH = os.path.join(_PROJECT_ROOT, "vector_store.json")
 
 
 class VectorStore:
