@@ -1,15 +1,15 @@
 """
 src/main.py
 
-FastAPI app exposing /ask and /contradict.
-Run with:
-  uvicorn src.main:app --reload
+FastAPI app exposing /ask (multilingual-aware), /contradict, /documents.
+Run with (from inside src/):
+  python -m uvicorn main:app --reload
 Then test at http://127.0.0.1:8000/docs
 """
 
 from fastapi import FastAPI
 from pydantic import BaseModel
-from qa import ask
+from translate import ask_multilingual
 from contradict import contradict, list_available_documents
 
 app = FastAPI(title="Document Q&A with Citations")
@@ -26,7 +26,12 @@ class ContradictRequest(BaseModel):
 
 @app.post("/ask")
 def ask_endpoint(req: AskRequest):
-    return ask(req.question)
+    """
+    Automatically detects the question's language. If not English,
+    translates to English for retrieval/generation, then translates
+    the answer back to the original language.
+    """
+    return ask_multilingual(req.question)
 
 
 @app.post("/contradict")

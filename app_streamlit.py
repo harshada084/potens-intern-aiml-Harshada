@@ -14,18 +14,19 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 import streamlit as st
-from qa import ask
+from translate import ask_multilingual
 from contradict import contradict, list_available_documents
 
 st.set_page_config(page_title="Document Q&A with Citations", layout="wide")
 
 st.title("📄 Document Q&A with Citations")
-st.caption("RAG system over fraud-detection research papers — ask questions or check for contradictions between papers.")
+st.caption("RAG system over fraud-detection research papers — ask questions (any language) or check for contradictions between papers.")
 
 tab1, tab2 = st.tabs(["Ask a Question", "Check for Contradictions"])
 
 with tab1:
     st.subheader("Ask a question about the documents")
+    st.caption("Works in any language — the question is translated automatically if needed.")
     question = st.text_input("Your question:", placeholder="e.g. What is SMOTE used for?")
 
     if st.button("Ask", type="primary"):
@@ -33,7 +34,10 @@ with tab1:
             st.warning("Please type a question first.")
         else:
             with st.spinner("Retrieving and generating answer..."):
-                result = ask(question)
+                result = ask_multilingual(question)
+
+            if result.get("detected_language", "en") != "en":
+                st.caption(f"Detected language: {result['detected_language']} — translated for retrieval, answer translated back.")
 
             if result["no_answer_found"]:
                 st.info("🚫 " + result["answer"])
