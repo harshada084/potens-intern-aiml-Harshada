@@ -2,48 +2,54 @@
 src/ingest.py
 
 Loads PDFs from data/, splits them into overlapping text chunks,
-embeds each chunk with Gemini, and stores everything in a local
-Chroma vector database (./chroma_db).
+embeds each chunk with Gemini, and stores everything in vector_store.json
+via the lightweight VectorStore (no chromadb, avoids native crashes).
 
 Run with:  python src/ingest.py
 """
 
 import os
 import glob
+import time
 from pypdf import PdfReader
-import chromadb
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+from google.genai import errors
 from dotenv import load_dotenv
+from vectorstore import VectorStore
 
 load_dotenv()
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
 DATA_DIR = "data"
-CHROMA_PATH = "chroma_db"
-COLLECTION_NAME = "docs"
+EMBEDDING_MODEL = "gemini-embedding-001"
 
-# --- Chunking config ---
-# Fixed-size chunking with overlap, split on paragraph boundaries where possible.
-CHUNK_SIZE = 500       # approx characters per chunk (kept simple; token-based is a stretch goal)
-CHUNK_OVERLAP = 50     # characters of overlap between consecutive chunks
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
 
 
 def extract_text_by_page(pdf_path):
-    """Returns a list of (page_number, text) tuples for a PDF."""
-    reader = PdfReader(pdf_path)
+    try:
+        reader = PdfReader(pdf_path)
+    except Exception as e:
+        print(f"    ERROR: could not open {pdf_path}: {e}")
+        return []
+
     pages = []
+    print(f"    PDF has {len(reader.pages)} page(s) according to PyPDF")
     for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
+        try:
+            text = page.extract_text() or ""
+        except Exception as e:
+            print(f"    ERROR extracting text from page {i + 1}: {e}")
+            text = ""
         if text.strip():
             pages.append((i + 1, text))
+    print(f"    -> {len(pages)} page(s) with usable text")
     return pages
 
 
 def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    """
-    Splits text into overlapping chunks, preferring paragraph breaks.
-    Falls back to a hard character cut if a paragraph is too long.
-    """
     paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
     chunks = []
     current = ""
@@ -54,7 +60,6 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
         else:
             if current:
                 chunks.append(current)
-            # start new chunk, carrying over the overlap from the end of the last chunk
             overlap_text = current[-overlap:] if current else ""
             current = (overlap_text + " " + para).strip()
 
@@ -64,14 +69,24 @@ def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     return chunks
 
 
-def embed_text(text):
-    """Embeds a single string using Gemini's embedding model."""
-    result = genai.embed_content(
-        model="models/text-embedding-004",
-        content=text,
-        task_type="retrieval_document",
-    )
-    return result["embedding"]
+def embed_text(text, max_retries=5):
+    for attempt in range(max_retries):
+        try:
+            result = client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=text,
+                config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+            )
+            time.sleep(0.8)
+            return result.embeddings[0].values
+        except errors.ClientError as e:
+            if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
+                wait_time = 35 + (attempt * 10)
+                print(f"    Rate limit hit, waiting {wait_time}s before retrying (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait_time)
+            else:
+                raise
+    raise RuntimeError("Failed to embed text after multiple retries due to rate limiting.")
 
 
 def main():
@@ -80,15 +95,9 @@ def main():
         print(f"No PDFs found in {DATA_DIR}/. Add your documents there first.")
         return
 
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
-    # Fresh start each run so re-ingesting doesn't duplicate chunks
-    try:
-        client.delete_collection(COLLECTION_NAME)
-    except Exception:
-        pass
-    collection = client.create_collection(COLLECTION_NAME)
+    store = VectorStore()
+    store.clear()  # fresh start each run
 
-    all_ids, all_embeddings, all_documents, all_metadatas = [], [], [], []
     chunk_counter = 0
 
     for pdf_path in pdf_files:
@@ -102,24 +111,19 @@ def main():
                 chunk_id = f"chunk_{chunk_counter}"
                 embedding = embed_text(chunk)
 
-                all_ids.append(chunk_id)
-                all_embeddings.append(embedding)
-                all_documents.append(chunk)
-                all_metadatas.append({
-                    "source": filename,
-                    "page": page_num,
-                    "chunk_id": chunk_id,
-                })
+                store.add(
+                    id=chunk_id,
+                    text=chunk,
+                    embedding=embedding,
+                    metadata={"source": filename, "page": page_num, "chunk_id": chunk_id},
+                )
                 chunk_counter += 1
+                print(f"    embedded chunk {chunk_counter} ({filename}, page {page_num})")
 
-    collection.add(
-        ids=all_ids,
-        embeddings=all_embeddings,
-        documents=all_documents,
-        metadatas=all_metadatas,
-    )
+        print(f"  -> {filename} done, running total: {chunk_counter} chunks")
 
-    print(f"\nDone. Ingested {chunk_counter} chunks from {len(pdf_files)} PDFs into {CHROMA_PATH}/")
+    store.save()
+    print(f"\nDone. Ingested {chunk_counter} chunks from {len(pdf_files)} PDFs into vector_store.json")
 
 
 if __name__ == "__main__":
